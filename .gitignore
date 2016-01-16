@@ -1,0 +1,5 @@
+src/photoctrl_cfg.lua
+
+*.out
+/html
+
