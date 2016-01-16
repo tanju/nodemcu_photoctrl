@@ -12,13 +12,15 @@ WIFI_CONNECT_TIMER_TIME = 5000; -- ms
 WIFI_CONNECT_TIMER =      1; -- timer id
 WIFI_SEND_BLOCK_SIZE =    1460;
 
-
+-- namespaces
+wlan = {}
+http = {}
 
 -- checks if for a given wifi name (SSID) a configuration is found in CONF_WIFI
 -- if cfg exists, connect to it
 -- t .. table of wifi stations
 -- returns true if a matching wifi was found
-function tryConnectWifi(t)
+function wlan.tryConnect(t)
 	for k,v in pairs(t) do
 		if CONF_WIFI[k] ~= nil then
 			print( "Station found " .. k ..", trying to connect" )
@@ -30,9 +32,9 @@ function tryConnectWifi(t)
 end
 
 -- scan all wifi networks and check if configuration is found for one of them
-function connectOrCreateWifi()
+function wlan.connectOrCreate()
 	wifi.setmode(wifi.STATION)
-	wifi.sta.getap(tryConnectWifi)
+	wifi.sta.getap(wlan.tryConnect)
 
 	-- create a timer to check if connection was established
 	-- if not, a hotspot will be setup
@@ -61,16 +63,19 @@ end
 -- sends a buffer on a given connection
 -- if the buffersize exedes WIFI_SEND_BLOCK_SIZE than several chunks are sent
 --
+-- will retrigger watchdog in order to allow sending of large buffers
+--
 -- conn .. connection
 -- buf ..  buffer to send
 --
 -- WIFI_SEND_BLOCK_SIZE
-function wifiSend( conn, buf )
+function wlan.send( conn, buf )
 	local startpos = 1
 	while startpos < #buf do
 		conn:send( string.sub( buf, startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1) ) )
-		print( "sending chunk ", startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1) )
+		-- print( "sending chunk ", startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1), "  buffer size", #buf )
 		startpos = startpos + WIFI_SEND_BLOCK_SIZE
+		tmr.wdclr()
 	end	
 end
 
@@ -83,8 +88,11 @@ function htmlfooter()
 	return "</body></html>"
 end
 
--- get file via http
-function httpgetfile( path )
+
+-- get file contents or 404 if file was not found
+--
+-- path .. path to file (first slash will be removed)
+function http.getfile( path )
 	if file.open( string.sub( path, 2, -1 ), "r" ) ~= nil then
 		local buf = file.read()
 		file.close()
@@ -96,7 +104,7 @@ function httpgetfile( path )
 end
 
 
-function httprequest(client,request)
+function http.request(client,request)
     local buf = "";
 
     -- parse http request
@@ -106,7 +114,7 @@ function httprequest(client,request)
     end
 
     if #path > 1 then
-    	buf = buf .. httpgetfile( path )
+    	buf = buf .. http.getfile( path )
     else
 	    -- parse parameters
 	    local _GET = {}
@@ -171,8 +179,9 @@ function httprequest(client,request)
 	end
 	
     --client:send(buf);
-    wifiSend( client, buf )
+    wlan.send( client, buf )
     client:close();
+    buf = nil
     collectgarbage();
 end
 
@@ -180,7 +189,7 @@ end
 
 --main
 -- try to connect to an existing wifi or create one
-connectOrCreateWifi()
+wlan.connectOrCreate()
 
 
 
@@ -190,5 +199,5 @@ gpio.mode(led1, gpio.OUTPUT)
 gpio.mode(led2, gpio.OUTPUT)
 srv=net.createServer(net.TCP)
 srv:listen(80,function(conn)
-    conn:on("receive", httprequest)
+    conn:on("receive", http.request)
 end)
