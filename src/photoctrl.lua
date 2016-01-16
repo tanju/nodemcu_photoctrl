@@ -81,13 +81,69 @@ function wlan.send( conn, buf )
 	end
 end
 
+-- html namespace
+html = {}
 
-function htmlheader( title )
-	return "<html><head><title>" .. title .. '</title><link rel="stylesheet" type="text/css" href="style.css"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body>'
+-- returns a file header for a html document
+function html.header( title )
+	return "<html><head><title>" .. title .. '</title><link rel="stylesheet" type="text/css" href="style.css"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="apple-mobile-web-app-capable" content="yes" /></head><body>'
 end
 
-function htmlfooter()
+-- returns the footer for a html document
+function html.footer()
 	return "</body></html>"
+end
+
+-- return gui title bar
+function html.title()
+	return '<div id="logo"><a id="logo" href="/menu">' .. ( PCMODENAMES[mode] and 'pC</a> <span id="mode">' .. PCMODENAMES[mode] .. '</span>' or "photoCtrl</a>" ) .. '</div><div id="topblock"></div>'
+end
+
+
+function html.menuitems( t )
+	local buf = ""
+	for _, item in pairs(t) do
+		if item == MENUSEPARATOR then
+			buf = buf .. '<div id="separator"></div>'
+		else
+			buf = buf .. '<p><div id="menuitem"><a id="menuitem" href="/' .. item .. '">' ..  PCMODENAMES[ PCMODE[item] ] .. '</a></div></p>'
+		end
+	end
+	return buf
+end
+
+function html.gui()
+	local buf = ""
+
+	-- display menus or the mode depending ui
+    if mode == PCMODE.menu then
+    	buf = buf .. html.menuitems( PCMAINMENU )
+    elseif mode == PCMODE.menuextras then
+    	buf = buf .. html.menuitems( PCEXTRASMENU )
+
+    elseif mode == PCMODE.lightning then
+	    buf = buf .. [[
+	    		<p>Gewitteraufnahme</p>
+		    ]]
+	elseif mode == PCMODE.bulb then
+	    buf = buf .. [[
+			<form>
+				<p>
+					<label>Belichtungszeit in Sekunden</label><br />
+					<input type="number" name="time" />
+				</p>
+				<p></p>
+				<p>This is an paragraph</p>
+				<p>PIO0 <a href="?pin=ON1"><button>ON</button></a>&nbsp;<a href="?pin=OFF1"><button>Start</button></a></p>
+			</form>
+			]]
+	elseif mode == PCMODE.debug then
+	    buf = buf.."<p>GPIO0 <a href=\"?pin=ON1\"><button>ON</button></a>&nbsp;<a href=\"?pin=OFF1\"><button>OFF</button></a></p>";
+	    buf = buf.."<p>GPIO2 <a href=\"?pin=ON2\"><button>ON</button></a>&nbsp;<a href=\"?pin=OFF2\"><button>OFF</button></a></p>";
+    	buf = buf .. ""
+    end
+
+    return buf
 end
 
 
@@ -114,21 +170,36 @@ end
 
 mode = 0;
 PCMODE = {
+	["menu"] = 0,
 	["lightning"] = 1,
 	["bulb"] = 2,
+	["menuextras"] = 98,
 	["debug"] = 99
 }
 
 PCMODENAMES = {
 	[1] = "Gewitter",
 	[2] = "Langzeit",
+	[98] = "Extras",
 	[99] = "Debug"
 }
+
+MENUSEPARATOR = "_sep_"
+PCMAINMENU = {"lightning", "bulb", MENUSEPARATOR, "menuextras"}
+PCEXTRASMENU = { "debug" }
+
+function getIDofValue( t, value )
+	for id, v in ipairs(t) do 
+		if value == v then 
+			return id 
+		end 
+	end
+end
 
 
 function http.request(client,request)
     local buf = "";
-    local getfile = false
+    local filewassent = false
 
     -- parse http request
     local _, _, method, path, vars = string.find(request, "([A-Z]+) (.+)?(.+) HTTP");
@@ -136,6 +207,8 @@ function http.request(client,request)
         _, _, method, path = string.find(request, "([A-Z]+) (.+) HTTP");
     end
 
+    -- if a path is given, than either a file is to be returned
+    -- or a mode swith is requested
     if #path > 1 then
     	-- remove leading slash
     	path = string.sub( path, 2, -1 )
@@ -143,14 +216,14 @@ function http.request(client,request)
 		if PCMODE[path] ~= nil then
 			mode = PCMODE[path]
 		else
+			-- no mode is found, so return file of an 404 error
     		buf = buf .. http.sendfile( client, path )
-    		if #buf == 0 then
-    			getfile = true
-    		end
+			filewassent = true -- file was found and set
 		end
     end
 
-    if getfile == false then
+    -- if no file was requested build user interface
+    if filewassent == false then
 	    -- parse parameters
 	    local _GET = {}
 	    if (vars ~= nil)then
@@ -159,64 +232,40 @@ function http.request(client,request)
 	        end
 	    end
 
-	    buf = buf .. htmlheader( "photoctrl" )
-	    buf = buf .. '<div id="logo">pC <span id="mode">' .. ( PCMODENAMES[mode] and PCMODENAMES[mode] or "" ) .. '</span></div><div id="topblock"></div>'
+	    buf = buf .. html.header( "photoctrl" )
+	    buf = buf .. html.title()
 
-	    buf = buf.."<h1>photoCtrl</h1>";
-	    buf = buf.."<p>GPIO0 <a href=\"?pin=ON1\"><button>ON</button></a>&nbsp;<a href=\"?pin=OFF1\"><button>OFF</button></a></p>";
-	    buf = buf.."<p>GPIO2 <a href=\"?pin=ON2\"><button>ON</button></a>&nbsp;<a href=\"?pin=OFF2\"><button>OFF</button></a></p>";
-	    local _on,_off = "",""
+	    buf = buf .. html.gui()
+
 	    if(_GET.pin == "ON1")then
 	        gpio.write(led1, gpio.HIGH);
-	        buf = buf .. "<p>ON1</p>"
 
 	    elseif(_GET.pin == "OFF1")then
 	        gpio.write(led1, gpio.LOW);
-	        buf = buf .. "<p>OFF1</p>"
 	    
 	    elseif(_GET.pin == "ON2")then
 	        gpio.write(led2, gpio.HIGH);
-	        buf = buf .. "<p>ON2</p>"
 	    
 	    elseif(_GET.pin == "OFF2")then
 	        gpio.write(led2, gpio.LOW);
-	        buf = buf .. "<p>OFF2</p>"
 	    end
 
-	    if mode == PCMODE.lightning then
-		    buf = buf .. [[
-				<div class="block">
-					<h2 class="block">Gewitteraufnahme</h2>
-					<form>
-						<p>
-							<label>Zeit</label> <input type="number" name="time" />
-							Belichtungszeit in Sekunden.
-						</p>
-						<p></p>
-					</form>
-				</div>
-			    ]]
-		elseif mode == PCMODE.bulb then
-		    buf = buf .. [[
-		    	<div class="block">
-				<h2 class="block">Langzeitbelichtung</h2>
-				<form>
-					<p>
-						<label>Zeit</label> <input type="number" name="time" />
-						Belichtungszeit in Sekunden.
-					</p>
-					<p></p>
-				</form>
-				</div>
-			    ]]
-		elseif mode == PCMODE.debug then
-		    buf = buf .. '<div class="block"><h2 class="block">Debuginfo</h2>'
-		    buf = buf .. "<h3>Path</h3><p>" .. path .. "</p>"
+	    -- extra debug
+	    if mode == PCMODE.debug then
+    	    buf = buf .. "<h3>Path</h3><p>" .. path .. "</p>"
 	    	buf = buf .. "<h2>Request</h3><p> " .. request .. "</p>"
-	    	buf = buf .. "</div"
+	    	buf = buf .. "<h2>Heap</h3><p> " .. node.heap() .. "</p>"
+	    	buf = buf .. "<h2>Files and Storage</h3><p><tt>"
+	    	for k,v in pairs(file.list()) do 
+	    		buf = buf .. k .. " (" .. v .. " bytes) <br />" 
+	    	end
+	    	local remaining, used, total=file.fsinfo()
+	    	buf = buf .. "</tt></p>"
+	    	buf = buf .. "<p>" .. (remaining * 100 / total) .. "% free</p>"
+
 	    end
 
-	    buf = buf .. htmlfooter()
+	    buf = buf .. html.footer()
 	end
 	
     --client:send(buf);
