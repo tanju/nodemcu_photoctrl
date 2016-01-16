@@ -127,14 +127,12 @@ function html.gui()
 		    ]]
 	elseif mode == PCMODE.bulb then
 	    buf = buf .. [[
-			<form>
+			<form action="/" method="get">
 				<p>
 					<label>Belichtungszeit in Sekunden</label><br />
 					<input type="number" name="time" />
 				</p>
-				<p></p>
-				<p>This is an paragraph</p>
-				<p>PIO0 <a href="?pin=ON1"><button>ON</button></a>&nbsp;<a href="?pin=OFF1"><button>Start</button></a></p>
+				<p><input type="submit" value="Los"></p>
 			</form>
 			]]
 	elseif mode == PCMODE.debug then
@@ -144,27 +142,6 @@ function html.gui()
     end
 
     return buf
-end
-
-
--- sends file contents or returns 404 if file was not found
---
--- client .. net.socket object
--- path .. path to file (first slash must be removed before calling)
-function http.sendfile( client, path )
-	if file.open( path, "r" ) ~= nil then
-		local buf
-		repeat
-			buf = file.read()
-			wlan.send( client, buf )
-		until buf == nil
-
-		file.close()
-		return ""
-	else
-		-- print("404 Not Found " .. string.sub( path, 2, -1 ))
-		return "404 Not found " 
-	end
 end
 
 
@@ -188,18 +165,141 @@ MENUSEPARATOR = "_sep_"
 PCMAINMENU = {"lightning", "bulb", MENUSEPARATOR, "menuextras"}
 PCEXTRASMENU = { "debug" }
 
-function getIDofValue( t, value )
-	for id, v in ipairs(t) do 
-		if value == v then 
-			return id 
-		end 
+
+-- function getIDofValue( t, value )
+-- 	for id, v in ipairs(t) do 
+-- 		if value == v then 
+-- 			return id 
+-- 		end 
+-- 	end
+-- end
+
+
+pc = {}
+
+TRIGGER_MIN_TIME = 200
+MAXBULBTIME = 600
+TRIGGER_TIMER = 2
+
+function pc.trigger( hold )
+	gpio.write(led2, gpio.LOW);
+	if( hold == false ) then
+		pc.releasein( TRIGGER_MIN_TIME )
 	end
 end
+
+
+function pc.release()
+	gpio.write(led2, gpio.HIGH);
+end
+
+
+function pc.releasein( time )
+	tmr.alarm(TRIGGER_TIMER, time, 0, pc.release)
+end
+
+
+
+function pc.modeaction( vars )
+	buf = ""
+	if mode == PCMODE["bulb"] then
+		if vars["time"] ~= nil then
+			time = tonumber( vars["time"] )
+			if time ~= nil then
+				if time > 0 and time < MAXBULBTIME then
+					pc.trigger( true )	
+					pc.releasein( time * 1000 )
+				else
+					buf = buf .. "Zeit für die Langzeitbelichtung ausßerhalb des gültigen Bereichs ( 0 bis " .. MAXBULBTIME .. " Sekunden )"
+				end
+			else
+				buf = buf .. "Ungültige Zeit für die Langzeitbelichtung angegeben"
+			end
+		end 
+	end
+
+	return buf
+end
+
+
+-- http web server ...........................................................
+-- 
+-- The follwing section implements a small web server that allows to initiate
+-- building the gui html page as well as providing a file from the ESP file
+-- system. Especially for the latter the event driven aproach of the ESP LUA
+-- needs to be considered. Therefore the webserver needs to know it's current
+-- state in order to provide the correct data in chunks.
+-- Since just one file can be open at a time, the webserver as well will not
+-- support parallel requests from different clients. Parallel requests will
+-- be rejected with 503.
+--
+-- TODO: lager gui buffers might as well be supported
+-- TODO: remove wlan send
+--
+-- http web server states
+http.STATE_IDLE =          0
+http.STATE_PROCESSING_RQ = 1
+http.STATE_BUILD_PAGE =    10
+http.STATE_SEND_FILE =     11
+
+http.state = http.STATE_IDLE
+
+-- sends file contents or returns 404 if file was not found
+--
+-- client .. net.socket object
+-- path .. path to file (first slash must be removed before calling)
+function http.sendfile( client, path )
+	if file.open( path, "r" ) ~= nil then
+
+		http.state = http.STATE_SEND_FILE
+		
+		local buf
+		--print ("http.sendfile " , path )
+		buf = file.read()
+		--print( #buf, "bytes read" )
+		wlan.send( client, buf )
+		return ""
+	else
+		-- print("404 Not Found " .. string.sub( path, 2, -1 ))
+		return "404 Not found " 
+	end
+end
+
+function http.sendnextblock( client )
+	if http.state == http.STATE_SEND_FILE then
+		--print ("http.sendfile (next block)" )
+
+		buf = file.read()
+		if buf ~= nil then
+			--print( #buf, "bytes read" )
+			wlan.send( client, buf )
+		else
+			--print( "end of file. closing connection" )
+			file.close()
+			http.state = http.STATE_IDLE
+			client:close()
+		end
+	end
+end
+
+
 
 
 function http.request(client,request)
     local buf = "";
     local filewassent = false
+
+    -- if another request is beeing currently processed, reject this request
+    if http.state ~= http.STATE_IDLE then
+		client:send( "503 Service Unavailable" )
+    	client:close();
+	    buf = nil
+    	collectgarbage();
+    	return
+    end
+
+    -- switch to http server state processing to block parallel requests
+    http.state = http.STATE_PROCESSING_RQ
 
     -- parse http request
     local _, _, method, path, vars = string.find(request, "([A-Z]+) (.+)?(.+) HTTP");
@@ -218,18 +318,22 @@ function http.request(client,request)
 		else
 			-- no mode is found, so return file of an 404 error
     		buf = buf .. http.sendfile( client, path )
-			filewassent = true -- file was found and set
 		end
     end
 
     -- if no file was requested build user interface
-    if filewassent == false then
+    if http.state == http.STATE_PROCESSING_RQ then
+    	http.state = http.STATE_BUILD_PAGE
+
+    	local modeactionresult = ""
 	    -- parse parameters
-	    local _GET = {}
-	    if (vars ~= nil)then
+	    local reqparameters = {}
+	    if vars ~= nil then
 	        for k, v in string.gmatch(vars, "(%w+)=(%w+)&*") do
-	            _GET[k] = v
+	            reqparameters[k] = v
 	        end
+
+	        modeactionresult = modeactionresult .. pc.modeaction( reqparameters )
 	    end
 
 	    buf = buf .. html.header( "photoctrl" )
@@ -237,16 +341,20 @@ function http.request(client,request)
 
 	    buf = buf .. html.gui()
 
-	    if(_GET.pin == "ON1")then
+	    if #modeactionresult > 0 then
+	    	buf = buf .. '<div class="block"><p>' .. modeactionresult .. '</p></div>'
+	    end
+
+	    if(reqparameters.pin == "ON1")then
 	        gpio.write(led1, gpio.HIGH);
 
-	    elseif(_GET.pin == "OFF1")then
+	    elseif(reqparameters.pin == "OFF1")then
 	        gpio.write(led1, gpio.LOW);
 	    
-	    elseif(_GET.pin == "ON2")then
+	    elseif(reqparameters.pin == "ON2")then
 	        gpio.write(led2, gpio.HIGH);
 	    
-	    elseif(_GET.pin == "OFF2")then
+	    elseif(reqparameters.pin == "OFF2")then
 	        gpio.write(led2, gpio.LOW);
 	    end
 
@@ -266,13 +374,18 @@ function http.request(client,request)
 	    end
 
 	    buf = buf .. html.footer()
+
+	    --client:send(buf);
+	    wlan.send( client, buf )
+	    client:close();
+	    buf = nil
+	    collectgarbage();
+
+	    -- set http server state to idle
+	    http.state = http.STATE_IDLE
+
 	end
-	
-    --client:send(buf);
-    wlan.send( client, buf )
-    client:close();
-    buf = nil
-    collectgarbage();
+
 end
 
 
@@ -290,4 +403,5 @@ gpio.mode(led2, gpio.OUTPUT)
 srv=net.createServer(net.TCP)
 srv:listen(80,function(conn)
     conn:on("receive", http.request)
+    conn:on("sent", http.sendnextblock)
 end)
