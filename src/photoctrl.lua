@@ -70,13 +70,15 @@ end
 --
 -- WIFI_SEND_BLOCK_SIZE
 function wlan.send( conn, buf )
-	local startpos = 1
-	while startpos < #buf do
-		conn:send( string.sub( buf, startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1) ) )
-		-- print( "sending chunk ", startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1), "  buffer size", #buf )
-		startpos = startpos + WIFI_SEND_BLOCK_SIZE
-		tmr.wdclr()
-	end	
+	if buf ~= nil then
+		local startpos = 1
+		while startpos < #buf do
+			conn:send( string.sub( buf, startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1) ) )
+			--print( "sending chunk ", startpos, (startpos+WIFI_SEND_BLOCK_SIZE > #buf  and -1 or startpos+WIFI_SEND_BLOCK_SIZE-1), "  buffer size", #buf )
+			startpos = startpos + WIFI_SEND_BLOCK_SIZE
+			tmr.wdclr()
+		end	
+	end
 end
 
 
@@ -89,14 +91,20 @@ function htmlfooter()
 end
 
 
--- get file contents or 404 if file was not found
+-- sends file contents or returns 404 if file was not found
 --
--- path .. path to file (first slash will be removed)
-function http.getfile( path )
-	if file.open( string.sub( path, 2, -1 ), "r" ) ~= nil then
-		local buf = file.read()
+-- client .. net.socket object
+-- path .. path to file (first slash must be removed before calling)
+function http.sendfile( client, path )
+	if file.open( path, "r" ) ~= nil then
+		local buf
+		repeat
+			buf = file.read()
+			wlan.send( client, buf )
+		until buf == nil
+
 		file.close()
-		return buf
+		return ""
 	else
 		-- print("404 Not Found " .. string.sub( path, 2, -1 ))
 		return "404 Not found " 
@@ -104,8 +112,23 @@ function http.getfile( path )
 end
 
 
+mode = 0;
+PCMODE = {
+	["lightning"] = 1,
+	["bulb"] = 2,
+	["debug"] = 99
+}
+
+PCMODENAMES = {
+	[1] = "Gewitter",
+	[2] = "Langzeit",
+	[99] = "Debug"
+}
+
+
 function http.request(client,request)
     local buf = "";
+    local getfile = false
 
     -- parse http request
     local _, _, method, path, vars = string.find(request, "([A-Z]+) (.+)?(.+) HTTP");
@@ -114,8 +137,20 @@ function http.request(client,request)
     end
 
     if #path > 1 then
-    	buf = buf .. http.getfile( path )
-    else
+    	-- remove leading slash
+    	path = string.sub( path, 2, -1 )
+    	-- check for mode switch
+		if PCMODE[path] ~= nil then
+			mode = PCMODE[path]
+		else
+    		buf = buf .. http.sendfile( client, path )
+    		if #buf == 0 then
+    			getfile = true
+    		end
+		end
+    end
+
+    if getfile == false then
 	    -- parse parameters
 	    local _GET = {}
 	    if (vars ~= nil)then
@@ -125,6 +160,7 @@ function http.request(client,request)
 	    end
 
 	    buf = buf .. htmlheader( "photoctrl" )
+	    buf = buf .. '<div id="logo">pC <span id="mode">' .. ( PCMODENAMES[mode] and PCMODENAMES[mode] or "" ) .. '</span></div><div id="topblock"></div>'
 
 	    buf = buf.."<h1>photoCtrl</h1>";
 	    buf = buf.."<p>GPIO0 <a href=\"?pin=ON1\"><button>ON</button></a>&nbsp;<a href=\"?pin=OFF1\"><button>OFF</button></a></p>";
@@ -147,19 +183,23 @@ function http.request(client,request)
 	        buf = buf .. "<p>OFF2</p>"
 	    end
 
-	    buf = buf .. [[
-	    	<div class="block">
-			<h2 class="block">Langzeitbelichtung</h2>
-			<form>
-				<p>
-					<label>Zeit</label> <input type="number" name="time" />
-					Belichtungszeit in Sekunden.
-				</p>
-				<p></p>
-			</form>
-			</div>
-			<div class="block">
-				<h2 class="block">Gewitteraufnahme</h2>
+	    if mode == PCMODE.lightning then
+		    buf = buf .. [[
+				<div class="block">
+					<h2 class="block">Gewitteraufnahme</h2>
+					<form>
+						<p>
+							<label>Zeit</label> <input type="number" name="time" />
+							Belichtungszeit in Sekunden.
+						</p>
+						<p></p>
+					</form>
+				</div>
+			    ]]
+		elseif mode == PCMODE.bulb then
+		    buf = buf .. [[
+		    	<div class="block">
+				<h2 class="block">Langzeitbelichtung</h2>
 				<form>
 					<p>
 						<label>Zeit</label> <input type="number" name="time" />
@@ -167,13 +207,14 @@ function http.request(client,request)
 					</p>
 					<p></p>
 				</form>
-			</div>
-		    ]]
-
-	    buf = buf .. '<div class="block"><h2 class="block">Debuginfo</h2>'
-	    buf = buf .. "<h3>Path</h3><p>" .. path .. "</p>"
-	    buf = buf .. "<h2>Request</h3><p> " .. request .. "</p>"
-	    buf = buf .. "</div"
+				</div>
+			    ]]
+		elseif mode == PCMODE.debug then
+		    buf = buf .. '<div class="block"><h2 class="block">Debuginfo</h2>'
+		    buf = buf .. "<h3>Path</h3><p>" .. path .. "</p>"
+	    	buf = buf .. "<h2>Request</h3><p> " .. request .. "</p>"
+	    	buf = buf .. "</div"
+	    end
 
 	    buf = buf .. htmlfooter()
 	end
